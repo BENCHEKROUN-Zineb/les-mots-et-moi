@@ -660,12 +660,15 @@ export default function App() {
 
                 <div>
                   <label className="block font-medium text-slate-300 mb-1">Langue</label>
-                  <input
-                    type="text"
+                  <select
                     value={formLivre.langue}
                     onChange={(e) => setFormLivre({ ...formLivre, langue: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-indigo-500 text-sm"
-                  />
+                  >
+                    <option value="Français">Français</option>
+                    <option value="Arabe">Arabe</option>
+                    <option value="Anglais">Anglais</option>
+                  </select>
                 </div>
 
                 <div>
