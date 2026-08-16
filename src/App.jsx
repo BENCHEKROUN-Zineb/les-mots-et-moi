@@ -1,5 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { db } from './firebase';
+import { db, auth, googleProvider } from './firebase';
+import { 
+  signInWithPopup, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged 
+} from 'firebase/auth';
 import { 
   collection, 
   onSnapshot, 
@@ -8,10 +15,14 @@ import {
   deleteDoc, 
   doc, 
   query, 
+  where,
   orderBy, 
   serverTimestamp 
 } from 'firebase/firestore';
-import { Plus, Search, Trash2, ArrowUp, BookOpen, Eye, Edit2, X, Star, Calendar, MessageSquare, History, Loader2 } from 'lucide-react';
+import { 
+  Plus, Search, Trash2, ArrowUp, BookOpen, Eye, Edit2, X, Star, Calendar, 
+  MessageSquare, History, Loader2, LogIn, LogOut, User as UserIcon 
+} from 'lucide-react';
 
 const INITIAL_FORM = {
   titre: '',
@@ -31,6 +42,15 @@ const INITIAL_FORM = {
 const STATUTS_ORDRE = ['À lire', 'En cours', 'Terminé'];
 
 export default function App() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  // État formulaire Auth Email
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [authError, setAuthError] = useState('');
+
   const [livres, setLivres] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -53,24 +73,45 @@ export default function App() {
     commentaire: ''
   });
 
-  // Écoute en temps réel de Firestore
+  // Écoute de l'état de connexion de l'utilisateur
   useEffect(() => {
-    const q = query(collection(db, 'livres'), orderBy('createdAt', 'desc'));
+    const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+    return () => unsubscribeAuth();
+  }, []);
+
+  // Écoute en temps réel des livres appartenant UNIQUEMENT à l'utilisateur connecté
+  useEffect(() => {
+    if (!user) {
+      setLivres([]);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    const q = query(
+      collection(db, 'livres'),
+      where('userId', '==', user.uid)
+    );
+
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const docsData = snapshot.docs.map((docSnap) => ({
         id: docSnap.id,
         ...docSnap.data(),
         avis: Array.isArray(docSnap.data().avis) ? docSnap.data().avis : []
       }));
+
+      // Tri local par date de création descendante
+      docsData.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+
       setLivres(docsData);
       setLoading(false);
 
-      // Si un livre est actuellement ouvert dans la modal, on met à jour ses données
       if (selectedBook) {
         const updatedSelected = docsData.find(b => b.id === selectedBook.id);
-        if (updatedSelected) {
-          setSelectedBook(updatedSelected);
-        }
+        if (updatedSelected) setSelectedBook(updatedSelected);
       }
     }, (error) => {
       console.error("Erreur Firestore :", error);
@@ -78,13 +119,41 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, [selectedBook?.id]);
+  }, [user, selectedBook?.id]);
 
   useEffect(() => {
     const handleScroll = () => setShowTopBtn(window.scrollY > 200);
     window.addEventListener('scroll', handleScroll);
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
+
+  // Méthodes d'authentification
+  const handleGoogleLogin = async () => {
+    try {
+      setAuthError('');
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      setAuthError("Erreur lors de la connexion Google : " + err.message);
+    }
+  };
+
+  const handleEmailAuth = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    try {
+      if (isRegisterMode) {
+        await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+      } else {
+        await signInWithEmailAndPassword(auth, authEmail, authPassword);
+      }
+    } catch (err) {
+      setAuthError(err.message);
+    }
+  };
+
+  const handleLogout = () => {
+    signOut(auth);
+  };
 
   const countByStatut = (st) => {
     if (st === 'Tous') return livres.length;
@@ -97,7 +166,6 @@ export default function App() {
     return (total / avisList.length).toFixed(1);
   };
 
-  // Changement rapide du statut au clic sur le badge
   const toggleStatutRapide = async (e, livre) => {
     e.stopPropagation();
     const currentIndex = STATUTS_ORDRE.indexOf(livre.statut);
@@ -112,7 +180,6 @@ export default function App() {
     }
   };
 
-  // Changement direct du statut depuis la modal
   const handleStatutChangeDirect = async (newStatut, livreId) => {
     try {
       const bookRef = doc(db, 'livres', livreId);
@@ -157,13 +224,13 @@ export default function App() {
     if (selectedBook) setSelectedBook(null);
   };
 
-  // Sauvegarder dans Firestore (Ajout ou Modification)
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!formLivre.titre || !formLivre.auteur) return;
+    if (!formLivre.titre || !formLivre.auteur || !user) return;
 
     const formattedData = {
       ...formLivre,
+      userId: user.uid,
       nb_pages: formLivre.nb_pages ? Number(formLivre.nb_pages) : null,
       prix: formLivre.prix ? parseFloat(formLivre.prix) : null,
       tomes: formLivre.tomes ? Number(formLivre.tomes) : 1,
@@ -185,26 +252,22 @@ export default function App() {
       setEditingId(null);
       setIsModalOpen(false);
     } catch (err) {
-      console.error("Erreur lors de l'enregistrement :", err);
+      console.error("Erreur enregistrement :", err);
       alert("Erreur lors de l'enregistrement.");
     }
   };
 
-  // Supprimer un livre de Firestore
   const handleDelete = async (id) => {
     if (window.confirm('Supprimer définitivement ce livre ?')) {
       try {
         await deleteDoc(doc(db, 'livres', id));
-        if (selectedBook && selectedBook.id === id) {
-          setSelectedBook(null);
-        }
+        if (selectedBook && selectedBook.id === id) setSelectedBook(null);
       } catch (err) {
         console.error("Erreur suppression :", err);
       }
     }
   };
 
-  // Gestion des avis
   const openNewAvisForm = () => {
     setEditingAvisId(null);
     setFormAvis({ note: 5, date_lecture: '', date_fin_lecture: '', commentaire: '' });
@@ -265,26 +328,140 @@ export default function App() {
     }
   };
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#0f172a] flex items-center justify-center text-slate-400 gap-3">
+        <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
+        <span>Chargement...</span>
+      </div>
+    );
+  }
+
+  // Écran de connexion si non connecté
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-[#0f172a] flex items-center justify-center p-4">
+        <div className="bg-slate-800/90 border border-slate-700/80 p-8 rounded-3xl max-w-md w-full shadow-2xl space-y-6 text-center">
+          <div className="flex justify-center">
+            <div className="p-3.5 bg-indigo-600/20 rounded-2xl border border-indigo-500/30">
+              <BookOpen className="w-10 h-10 text-indigo-400" />
+            </div>
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-white">Les Mots et Moi</h1>
+            <p className="text-sm text-slate-400 mt-1">Votre espace de lecture personnel et synchronisé</p>
+          </div>
+
+          {authError && (
+            <div className="p-3 bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs rounded-xl text-left">
+              {authError}
+            </div>
+          )}
+
+          <button
+            onClick={handleGoogleLogin}
+            className="w-full py-3 px-4 bg-white hover:bg-slate-100 text-slate-800 font-semibold rounded-xl flex items-center justify-center gap-3 transition shadow-md"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24">
+              <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.4 9 5 12 5z"/>
+              <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.8z"/>
+              <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3 0-.8.1-1.6.4-2.3L1.9 7.3C.7 9.7 0 12.3 0 15.2s.7 5.5 1.9 7.9l3.7-2.9z"/>
+              <path fill="#34A853" d="M12 23.5c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.4-6.4-5.2L1.9 16.5C3.7 20.9 7.5 23.5 12 23.5z"/>
+            </svg>
+            Continuer avec Google
+          </button>
+
+          <div className="flex items-center my-4 text-xs text-slate-500">
+            <div className="flex-1 border-b border-slate-700"></div>
+            <span className="px-3">ou par e-mail</span>
+            <div className="flex-1 border-b border-slate-700"></div>
+          </div>
+
+          <form onSubmit={handleEmailAuth} className="space-y-3 text-left text-xs">
+            <div>
+              <label className="block text-slate-300 mb-1">Email</label>
+              <input
+                type="email"
+                required
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                placeholder="votre@email.com"
+                className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white focus:outline-none focus:border-indigo-500 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-300 mb-1">Mot de passe</label>
+              <input
+                type="password"
+                required
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white focus:outline-none focus:border-indigo-500 text-sm"
+              />
+            </div>
+            <button
+              type="submit"
+              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl text-sm transition mt-2 shadow"
+            >
+              {isRegisterMode ? "Créer un compte" : "Se connecter"}
+            </button>
+          </form>
+
+          <p className="text-xs text-slate-400">
+            {isRegisterMode ? "Déjà un compte ?" : "Pas encore de compte ?"}{' '}
+            <button
+              onClick={() => setIsRegisterMode(!isRegisterMode)}
+              className="text-indigo-400 hover:underline font-medium"
+            >
+              {isRegisterMode ? "Se connecter" : "S'inscrire"}
+            </button>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0f172a] text-slate-100 p-4 sm:p-8">
       <div className="max-w-6xl mx-auto space-y-6">
 
         {/* Header */}
-        <header className="flex items-center justify-between pb-4 border-b border-slate-800">
+        <header className="flex items-center justify-between pb-4 border-b border-slate-800 gap-4">
           <div className="flex items-center gap-3">
             <BookOpen className="w-8 h-8 text-indigo-500" />
-            <h1 className="text-2xl font-bold">Les Mots et Moi</h1>
+            <h1 className="text-xl sm:text-2xl font-bold">Les Mots et Moi</h1>
           </div>
-          <button
-            onClick={openAddModal}
-            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white text-sm font-medium rounded-xl shadow-lg transition"
-          >
-            <Plus className="w-4 h-4" />
-            Ajouter un livre
-          </button>
+          
+          <div className="flex items-center gap-3">
+            <button
+              onClick={openAddModal}
+              className="flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white text-xs sm:text-sm font-medium rounded-xl shadow-lg transition"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Ajouter</span>
+            </button>
+
+            <div className="flex items-center gap-2 pl-3 border-l border-slate-800">
+              {user.photoURL ? (
+                <img src={user.photoURL} alt={user.displayName} className="w-8 h-8 rounded-full border border-indigo-500" />
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-xs font-bold">
+                  {user.email?.[0]?.toUpperCase() || <UserIcon className="w-4 h-4" />}
+                </div>
+              )}
+              <button
+                onClick={handleLogout}
+                className="text-slate-400 hover:text-rose-400 p-1.5 transition"
+                title="Se déconnecter"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
         </header>
 
-        {/* Barre de Recherche & Filtres */}
+        {/* Recherche & Filtres */}
         <div className="bg-slate-800/80 p-4 rounded-2xl border border-slate-700/60 flex flex-col md:flex-row gap-4 items-center justify-between shadow-sm">
           <div className="relative w-full md:w-80">
             <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -319,17 +496,17 @@ export default function App() {
           </div>
         </div>
 
-        {/* Grille des Livres */}
+        {/* Grille */}
         <div>
           <h2 className="text-xl font-bold mb-4">Ma Bibliothèque</h2>
           {loading ? (
             <div className="flex flex-col items-center justify-center py-16 gap-3 text-slate-400">
               <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
-              <p className="text-sm">Chargement de votre bibliothèque cloud...</p>
+              <p className="text-sm">Synchronisation de vos livres...</p>
             </div>
           ) : filteredBooks.length === 0 ? (
             <div className="text-center py-12 bg-slate-800/40 rounded-2xl border border-slate-800 text-slate-400">
-              Aucun livre trouvé.
+              Aucun livre dans votre bibliothèque.
             </div>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-5">
@@ -388,7 +565,7 @@ export default function App() {
                           <button 
                             onClick={() => { setSelectedBook(livre); setShowAvisForm(false); }}
                             className="text-slate-400 hover:text-indigo-400 p-1"
-                            title="Détails & Lectures"
+                            title="Détails"
                           >
                             <Eye className="w-3.5 h-3.5" />
                           </button>
@@ -419,7 +596,7 @@ export default function App() {
 
       </div>
 
-      {/* MODAL AJOUT / MODIFICATION DU LIVRE */}
+      {/* MODAL AJOUT / MODIFICATION */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-2xl p-6 shadow-2xl space-y-4 my-8 max-h-[90vh] overflow-y-auto">
@@ -592,7 +769,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL DE DÉTAILS & GESTION DES RELECTURES */}
+      {/* MODAL DE DÉTAILS */}
       {selectedBook && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-xl overflow-hidden shadow-2xl space-y-4 my-6 max-h-[90vh] overflow-y-auto">
@@ -670,7 +847,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* --- HISTORIQUE DES LECTURES & RELECTURES --- */}
+              {/* Lectures */}
               <div className="pt-4 border-t border-slate-700 space-y-3">
                 <div className="flex items-center justify-between">
                   <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
@@ -688,7 +865,6 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Formulaire d'ajout / édition d'une relecture */}
                 {showAvisForm && (
                   <form onSubmit={handleSaveAvis} className="bg-slate-900 p-4 rounded-xl border border-indigo-500/40 space-y-3 text-xs">
                     <div className="flex items-center justify-between">
@@ -778,7 +954,6 @@ export default function App() {
                   </form>
                 )}
 
-                {/* Liste des avis */}
                 {(!Array.isArray(selectedBook.avis) || selectedBook.avis.length === 0) ? (
                   <p className="text-xs text-slate-400 italic text-center py-4 bg-slate-900/30 rounded-xl border border-slate-800">
                     Aucune session de lecture enregistrée pour ce livre.
@@ -817,14 +992,14 @@ export default function App() {
                               <button
                                 onClick={() => openEditAvisForm(avisItem)}
                                 className="text-slate-400 hover:text-amber-400 p-1"
-                                title="Modifier cette lecture"
+                                title="Modifier"
                               >
                                 <Edit2 className="w-3.5 h-3.5" />
                               </button>
                               <button
                                 onClick={() => handleDeleteAvis(avisItem.id_avis)}
                                 className="text-slate-400 hover:text-rose-400 p-1"
-                                title="Supprimer cette lecture"
+                                title="Supprimer"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
@@ -859,7 +1034,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Bouton Retour en Haut */}
+      {/* Bouton retour en haut */}
       {showTopBtn && (
         <button
           onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
