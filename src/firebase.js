@@ -1,8 +1,9 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
+// Remplace avec tes vraies clés Firebase :
 const firebaseConfig = {
-  apiKey: "AIzaSyDnq_S7Gp8MS2mPeWq2TO11KQ_rsDrGr6O",
+  apiKey: "AIzaSyDnq_S7Gp8MS2mPeWq2TO11KQ_rsDrGr60",
   authDomain: "les-mots-et-moi.firebaseapp.com",
   projectId: "les-mots-et-moi",
   storageBucket: "les-mots-et-moi.firebasestorage.app",

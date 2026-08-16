@@ -1,63 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Search, Trash2, ArrowUp, BookOpen, Eye, Edit2, X, Star, Calendar, MessageSquare, History } from 'lucide-react';
-
-const LIVRES_DE_DEPART = [
-  {
-    id: 1,
-    titre: 'Ikadoli',
-    auteur: 'Hanane Lachine',
-    statut: 'Terminé',
-    description: 'Un voyage poétique et mystérieux dans un univers fascinant.',
-    langue: 'Arabe',
-    nb_pages: 320,
-    prix: 85.00,
-    date_achat: '2020-05-10',
-    lieu_achat: 'Librairie Al Maarif',
-    format: 'Papier',
-    tomes: 1,
-    image: 'https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=400',
-    avis: [
-      {
-        id_avis: 101,
-        note: 4,
-        date_lecture: '2020-06-01',
-        date_fin_lecture: '2020-06-15',
-        commentaire: 'Première découverte : une histoire touchante et pleine de symbolisme.'
-      },
-      {
-        id_avis: 102,
-        note: 5,
-        date_lecture: '2025-07-10',
-        date_fin_lecture: '2025-07-22',
-        commentaire: 'Relecture 5 ans après : j\'ai perçu tellement de nuances et de sagesse que je n\'avais pas saisies à l\'époque.'
-      }
-    ]
-  },
-  {
-    id: 2,
-    titre: 'Opal',
-    auteur: 'Hanane Lachine',
-    statut: 'Terminé',
-    description: 'La suite captivante explorant les émotions et destins croisés.',
-    langue: 'Arabe',
-    nb_pages: 290,
-    prix: 90.00,
-    date_achat: '2025-07-20',
-    lieu_achat: 'Librairie Al Maarif',
-    format: 'Papier',
-    tomes: 2,
-    image: 'https://images.unsplash.com/photo-1512820790803-83ca734da794?auto=format&fit=crop&q=80&w=400',
-    avis: [
-      {
-        id_avis: 201,
-        note: 4.5,
-        date_lecture: '2025-08-05',
-        date_fin_lecture: '2025-08-18',
-        commentaire: 'Très belle suite, riche en rebondissements et en émotions.'
-      }
-    ]
-  }
-];
+import { db } from './firebase';
+import { 
+  collection, 
+  onSnapshot, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  doc, 
+  query, 
+  orderBy, 
+  serverTimestamp 
+} from 'firebase/firestore';
+import { Plus, Search, Trash2, ArrowUp, BookOpen, Eye, Edit2, X, Star, Calendar, MessageSquare, History, Loader2 } from 'lucide-react';
 
 const INITIAL_FORM = {
   titre: '',
@@ -77,21 +31,8 @@ const INITIAL_FORM = {
 const STATUTS_ORDRE = ['À lire', 'En cours', 'Terminé'];
 
 export default function App() {
-  const [livres, setLivres] = useState(() => {
-    try {
-      const data = localStorage.getItem('livres_pwa');
-      if (!data) return LIVRES_DE_DEPART;
-      const parsed = JSON.parse(data);
-      return Array.isArray(parsed)
-        ? parsed.map(b => ({
-            ...b,
-            avis: Array.isArray(b.avis) ? b.avis : (b.avis ? [b.avis] : [])
-          }))
-        : LIVRES_DE_DEPART;
-    } catch {
-      return LIVRES_DE_DEPART;
-    }
-  });
+  const [livres, setLivres] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   const [search, setSearch] = useState('');
   const [statutFiltre, setStatutFiltre] = useState('Tous');
@@ -102,6 +43,7 @@ export default function App() {
 
   const [formLivre, setFormLivre] = useState(INITIAL_FORM);
 
+  // Gestion des avis multiples
   const [showAvisForm, setShowAvisForm] = useState(false);
   const [editingAvisId, setEditingAvisId] = useState(null);
   const [formAvis, setFormAvis] = useState({
@@ -111,9 +53,32 @@ export default function App() {
     commentaire: ''
   });
 
+  // Écoute en temps réel de Firestore
   useEffect(() => {
-    localStorage.setItem('livres_pwa', JSON.stringify(livres));
-  }, [livres]);
+    const q = query(collection(db, 'livres'), orderBy('createdAt', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const docsData = snapshot.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+        avis: Array.isArray(docSnap.data().avis) ? docSnap.data().avis : []
+      }));
+      setLivres(docsData);
+      setLoading(false);
+
+      // Si un livre est actuellement ouvert dans la modal, on met à jour ses données
+      if (selectedBook) {
+        const updatedSelected = docsData.find(b => b.id === selectedBook.id);
+        if (updatedSelected) {
+          setSelectedBook(updatedSelected);
+        }
+      }
+    }, (error) => {
+      console.error("Erreur Firestore :", error);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [selectedBook?.id]);
 
   useEffect(() => {
     const handleScroll = () => setShowTopBtn(window.scrollY > 200);
@@ -132,39 +97,29 @@ export default function App() {
     return (total / avisList.length).toFixed(1);
   };
 
-  // Fonction pour faire défiler rapidement le statut au clic sur le badge
-  const toggleStatutRapide = (e, livreId) => {
-    e.stopPropagation(); // Évite d'ouvrir la modal de détails en cliquant sur le badge
+  // Changement rapide du statut au clic sur le badge
+  const toggleStatutRapide = async (e, livre) => {
+    e.stopPropagation();
+    const currentIndex = STATUTS_ORDRE.indexOf(livre.statut);
+    const nextIndex = (currentIndex + 1) % STATUTS_ORDRE.length;
+    const newStatut = STATUTS_ORDRE[nextIndex];
 
-    const updated = livres.map((b) => {
-      if (b.id === livreId) {
-        const currentIndex = STATUTS_ORDRE.indexOf(b.statut);
-        const nextIndex = (currentIndex + 1) % STATUTS_ORDRE.length;
-        const newStatut = STATUTS_ORDRE[nextIndex];
-        const updatedBook = { ...b, statut: newStatut };
-        
-        if (selectedBook && selectedBook.id === livreId) {
-          setSelectedBook(updatedBook);
-        }
-        return updatedBook;
-      }
-      return b;
-    });
-
-    setLivres(updated);
+    try {
+      const bookRef = doc(db, 'livres', livre.id);
+      await updateDoc(bookRef, { statut: newStatut });
+    } catch (err) {
+      console.error("Erreur mise à jour statut :", err);
+    }
   };
 
-  // Modification directe du statut depuis la modal de détails
-  const handleStatutChangeDirect = (newStatut, livreId) => {
-    const updated = livres.map((b) => {
-      if (b.id === livreId) {
-        const updatedBook = { ...b, statut: newStatut };
-        setSelectedBook(updatedBook);
-        return updatedBook;
-      }
-      return b;
-    });
-    setLivres(updated);
+  // Changement direct du statut depuis la modal
+  const handleStatutChangeDirect = async (newStatut, livreId) => {
+    try {
+      const bookRef = doc(db, 'livres', livreId);
+      await updateDoc(bookRef, { statut: newStatut });
+    } catch (err) {
+      console.error("Erreur mise à jour statut :", err);
+    }
   };
 
   const filteredBooks = livres.filter((l) => {
@@ -202,7 +157,8 @@ export default function App() {
     if (selectedBook) setSelectedBook(null);
   };
 
-  const handleSubmit = (e) => {
+  // Sauvegarder dans Firestore (Ajout ou Modification)
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!formLivre.titre || !formLivre.auteur) return;
 
@@ -214,26 +170,41 @@ export default function App() {
       image: formLivre.image || 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?auto=format&fit=crop&q=80&w=400'
     };
 
-    if (editingId) {
-      setLivres(livres.map((item) => (item.id === editingId ? { ...item, ...formattedData } : item)));
-    } else {
-      setLivres([{ ...formattedData, id: Date.now(), avis: [] }, ...livres]);
+    try {
+      if (editingId) {
+        const bookRef = doc(db, 'livres', editingId);
+        await updateDoc(bookRef, formattedData);
+      } else {
+        await addDoc(collection(db, 'livres'), {
+          ...formattedData,
+          avis: [],
+          createdAt: serverTimestamp()
+        });
+      }
+      setFormLivre(INITIAL_FORM);
+      setEditingId(null);
+      setIsModalOpen(false);
+    } catch (err) {
+      console.error("Erreur lors de l'enregistrement :", err);
+      alert("Erreur lors de l'enregistrement.");
     }
-
-    setFormLivre(INITIAL_FORM);
-    setEditingId(null);
-    setIsModalOpen(false);
   };
 
-  const handleDelete = (id) => {
-    if (window.confirm('Supprimer ce livre ?')) {
-      setLivres(livres.filter((b) => b.id !== id));
-      if (selectedBook && selectedBook.id === id) {
-        setSelectedBook(null);
+  // Supprimer un livre de Firestore
+  const handleDelete = async (id) => {
+    if (window.confirm('Supprimer définitivement ce livre ?')) {
+      try {
+        await deleteDoc(doc(db, 'livres', id));
+        if (selectedBook && selectedBook.id === id) {
+          setSelectedBook(null);
+        }
+      } catch (err) {
+        console.error("Erreur suppression :", err);
       }
     }
   };
 
+  // Gestion des avis
   const openNewAvisForm = () => {
     setEditingAvisId(null);
     setFormAvis({ note: 5, date_lecture: '', date_fin_lecture: '', commentaire: '' });
@@ -251,7 +222,7 @@ export default function App() {
     setShowAvisForm(true);
   };
 
-  const handleSaveAvis = (e) => {
+  const handleSaveAvis = async (e) => {
     e.preventDefault();
     if (!selectedBook) return;
 
@@ -270,36 +241,28 @@ export default function App() {
       updatedAvisList = [newAvis, ...currentAvis];
     }
 
-    const updatedLivres = livres.map((b) => {
-      if (b.id === selectedBook.id) {
-        const updatedBook = { ...b, avis: updatedAvisList };
-        setSelectedBook(updatedBook);
-        return updatedBook;
-      }
-      return b;
-    });
-
-    setLivres(updatedLivres);
-    setShowAvisForm(false);
-    setEditingAvisId(null);
+    try {
+      const bookRef = doc(db, 'livres', selectedBook.id);
+      await updateDoc(bookRef, { avis: updatedAvisList });
+      setShowAvisForm(false);
+      setEditingAvisId(null);
+    } catch (err) {
+      console.error("Erreur enregistrement avis :", err);
+    }
   };
 
-  const handleDeleteAvis = (idAvis) => {
+  const handleDeleteAvis = async (idAvis) => {
     if (!window.confirm('Supprimer cette note de lecture ?')) return;
 
     const currentAvis = Array.isArray(selectedBook.avis) ? selectedBook.avis : [];
     const updatedAvisList = currentAvis.filter((a) => a.id_avis !== idAvis);
     
-    const updatedLivres = livres.map((b) => {
-      if (b.id === selectedBook.id) {
-        const updatedBook = { ...b, avis: updatedAvisList };
-        setSelectedBook(updatedBook);
-        return updatedBook;
-      }
-      return b;
-    });
-
-    setLivres(updatedLivres);
+    try {
+      const bookRef = doc(db, 'livres', selectedBook.id);
+      await updateDoc(bookRef, { avis: updatedAvisList });
+    } catch (err) {
+      console.error("Erreur suppression avis :", err);
+    }
   };
 
   return (
@@ -359,7 +322,12 @@ export default function App() {
         {/* Grille des Livres */}
         <div>
           <h2 className="text-xl font-bold mb-4">Ma Bibliothèque</h2>
-          {filteredBooks.length === 0 ? (
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-3 text-slate-400">
+              <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
+              <p className="text-sm">Chargement de votre bibliothèque cloud...</p>
+            </div>
+          ) : filteredBooks.length === 0 ? (
             <div className="text-center py-12 bg-slate-800/40 rounded-2xl border border-slate-800 text-slate-400">
               Aucun livre trouvé.
             </div>
@@ -380,10 +348,9 @@ export default function App() {
                     >
                       <img src={livre.image} alt={livre.titre} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
                       
-                      {/* BADGE CLIQUABLE DIRECTEMENT POUR CHANGER LE STATUT */}
                       <button
                         type="button"
-                        onClick={(e) => toggleStatutRapide(e, livre.id)}
+                        onClick={(e) => toggleStatutRapide(e, livre)}
                         title="Cliquer pour changer le statut"
                         className={`absolute top-2.5 right-2.5 px-2.5 py-0.5 text-[10px] font-bold rounded-full text-white shadow-lg transition transform hover:scale-110 active:scale-95 cursor-pointer z-10 ${
                           livre.statut === 'Terminé' 
@@ -396,7 +363,6 @@ export default function App() {
                         {livre.statut} ↻
                       </button>
 
-                      {/* Badge Note Moyenne */}
                       {noteMoyenne && (
                         <span className="absolute bottom-2.5 left-2.5 px-2 py-0.5 text-[11px] font-bold rounded-lg bg-black/80 text-amber-300 flex items-center gap-1 shadow-md backdrop-blur-sm">
                           <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
@@ -640,7 +606,6 @@ export default function App() {
                 <X className="w-5 h-5" />
               </button>
 
-              {/* SÉLECTEUR RAPIDE DE STATUT DANS LA MODAL */}
               <div className="absolute bottom-3 left-3 flex items-center gap-1.5 bg-black/70 backdrop-blur-md p-1 rounded-xl border border-white/10">
                 {STATUTS_ORDRE.map((st) => (
                   <button
@@ -678,7 +643,6 @@ export default function App() {
                 </p>
               )}
 
-              {/* Caractéristiques */}
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
                 <div className="bg-slate-900/40 p-2.5 rounded-lg border border-slate-700/40">
                   <span className="text-slate-500 block text-[10px]">Langue</span>
