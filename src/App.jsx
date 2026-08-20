@@ -681,6 +681,7 @@ export default function App() {
                     <option value="Papier">Papier</option>
                     <option value="PDF">PDF</option>
                     <option value="Emprunté">Emprunté</option>
+                    <option value="Audio">Audio</option>
                   </select>
                 </div>
 
